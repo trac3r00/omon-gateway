@@ -53,7 +53,6 @@ impl AgentRunner for StubRunner {
 
 struct E2eRig {
     mock: MockWebApi,
-    ws_url: String,
     envelopes: mpsc::Sender<Value>,
     connections: Arc<Mutex<usize>>,
     ws_handle: tokio::task::JoinHandle<()>,
@@ -106,7 +105,6 @@ impl E2eRig {
         mock.set_socket_url(&ws_url).await;
         Self {
             mock,
-            ws_url,
             envelopes: envelope_tx,
             connections,
             ws_handle,

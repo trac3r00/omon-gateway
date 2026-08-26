@@ -382,6 +382,7 @@ pub(crate) struct Config {
     slack_bot_token: Option<String>,
     slack_app_token: Option<String>,
     slack_api_base: String,
+    slack_filter: omon_gateway::slack::OwnedSlackFilter,
     database_url: String,
     default_model: String,
     openai_api_base: Option<String>,
@@ -509,6 +510,30 @@ impl Config {
         let slack_api_base = optional_env("SLACK_API_BASE")
             .map(|base| base.trim_end_matches('/').to_string())
             .unwrap_or_else(|| omon_gateway::slack::DEFAULT_SLACK_API_BASE.to_string());
+        let slack_filter = omon_gateway::slack::OwnedSlackFilter {
+            free_response_channels: parse_string_list(
+                optional_env("SLACK_FREE_RESPONSE_CHANNELS").as_deref(),
+            ),
+            allowed_users: parse_string_list(optional_env("SLACK_ALLOWED_USERS").as_deref()),
+            allow_all_users: parse_bool_from(
+                optional_env("SLACK_ALLOW_ALL_USERS").as_deref(),
+                false,
+            ),
+            thread_sessions_per_user: parse_bool_from(
+                optional_env("SLACK_THREAD_SESSIONS_PER_USER").as_deref(),
+                true,
+            ),
+            allowed_channels: parse_string_list(
+                optional_env("SLACK_ALLOWED_CHANNELS").as_deref(),
+            ),
+            ignored_channels: parse_string_list(
+                optional_env("SLACK_IGNORED_CHANNELS").as_deref(),
+            ),
+            thread_require_mention: parse_bool_from(
+                optional_env("SLACK_THREAD_REQUIRE_MENTION").as_deref(),
+                false,
+            ),
+        };
 
         let workspace_root = env::var_os("OMON_WORKSPACE_ROOT")
             .map(PathBuf::from)
@@ -549,6 +574,7 @@ impl Config {
             slack_bot_token,
             slack_app_token,
             slack_api_base,
+            slack_filter,
             database_url: env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "sqlite://omon_gateway.db".to_owned()),
             default_model: required_env("DEFAULT_MODEL")?,
@@ -2256,8 +2282,22 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_gateway() -> Result<()> {
-    let config = Config::from_env()?;
+struct AgentStack {
+    pool: SqlitePool,
+    tools: ToolRegistry,
+    tool_names: Vec<String>,
+    llm: LlmClient,
+    shared_dispatcher: Arc<SharedDispatcher>,
+    runner: Arc<LiveAgentRunner>,
+    profile_router: ProfileRouter,
+    multiplexer: SessionMultiplexer,
+    scale_to_zero: ScaleToZero,
+    approval_guard: SmartApprovalGuard,
+    approval_requester: Arc<DiscordApprovalRequester>,
+    cron_sync: HermesStoreSynchronizer,
+}
+
+async fn build_agent_stack(config: &Config) -> Result<AgentStack> {
     let pool = init_pool(&config.database_url).await?;
     let memory = MemoryStore::new(pool.clone());
 
@@ -2345,6 +2385,68 @@ async fn run_gateway() -> Result<()> {
     );
     let scale_to_zero = ScaleToZero::start(multiplexer.clone());
 
+    let retention_days = cron_runs_retention_days_from_environment()?;
+    let pruned = prune_terminal_cron_runs(&pool, retention_days, chrono::Utc::now()).await?;
+    info!(pruned, retention_days, "pruned old terminal cron runs");
+
+    let cron_sync = HermesStoreSynchronizer::from_environment(pool.clone())?;
+    let imported = cron_sync.sync().await?;
+    info!(imported, "synchronized Hermes cron stores");
+
+    Ok(AgentStack {
+        pool,
+        tools,
+        tool_names,
+        llm,
+        shared_dispatcher,
+        runner,
+        profile_router,
+        multiplexer,
+        scale_to_zero,
+        approval_guard,
+        approval_requester,
+        cron_sync,
+    })
+}
+
+async fn maybe_resume_pending_sessions(
+    config: &Config,
+    pool: &SqlitePool,
+    multiplexer: &SessionMultiplexer,
+) -> Result<()> {
+    let restart_guard_path = config.workspace_root.join("restart_loop.json");
+    let restart_guard = RestartLoopGuard::new(restart_guard_path);
+    let pending_sessions_count =
+        omon_gateway::storage::count_resume_pending_sessions(pool).await?;
+    if pending_sessions_count > 0 {
+        if restart_guard.check_and_record() {
+            warn!(
+                pending_sessions_count,
+                "Restart-loop breaker TRIPPED: skipping auto-resume of in-flight sessions to break crash loop"
+            );
+        } else {
+            let recovered_sessions = recover_resume_pending_sessions(pool, multiplexer).await?;
+            info!(
+                recovered_sessions,
+                "recovered resume_pending sessions on boot"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn run_gateway() -> Result<()> {
+    let config = Config::from_env()?;
+    match config.platform {
+        omon_gateway::Platform::Discord => run_gateway_discord(config).await,
+        omon_gateway::Platform::Slack => run_gateway_slack(config).await,
+    }
+}
+
+async fn run_gateway_discord(config: Config) -> Result<()> {
+    let stack = build_agent_stack(&config).await?;
+    let pool = stack.pool.clone();
+
     let mut bot_http_clients = HashMap::new();
     let mut default_bot_id = None;
     for token in &config.discord_bot_tokens {
@@ -2365,21 +2467,18 @@ async fn run_gateway() -> Result<()> {
         DiscordEgress::with_bot_clients(default_bot_id.clone(), bot_http_clients)?
             .with_approval_mentions(config.allowed_users.clone(), config.approval_mentions),
     );
-    shared_dispatcher.set(discord_egress.clone()).await;
-    approval_requester
+    stack
+        .shared_dispatcher
+        .set(discord_egress.clone())
+        .await;
+    stack
+        .approval_requester
         .set_dispatcher(discord_egress.clone())
         .await;
-    approval_requester
-        .set_heartbeat(multiplexer.activity_heartbeat())
+    stack
+        .approval_requester
+        .set_heartbeat(stack.multiplexer.activity_heartbeat())
         .await;
-
-    let retention_days = cron_runs_retention_days_from_environment()?;
-    let pruned = prune_terminal_cron_runs(&pool, retention_days, chrono::Utc::now()).await?;
-    info!(pruned, retention_days, "pruned old terminal cron runs");
-
-    let cron_sync = HermesStoreSynchronizer::from_environment(pool.clone())?;
-    let imported = cron_sync.sync().await?;
-    info!(imported, "synchronized Hermes cron stores");
 
     let recovered = recover_pending_delivery_obligations(&pool, discord_egress.clone()).await?;
     info!(
@@ -2387,43 +2486,26 @@ async fn run_gateway() -> Result<()> {
         "recovered pending outbound delivery obligations on boot"
     );
 
-    let restart_guard_path = config.workspace_root.join("restart_loop.json");
-    let restart_guard = RestartLoopGuard::new(restart_guard_path);
-    let pending_sessions_count =
-        omon_gateway::storage::count_resume_pending_sessions(&pool).await?;
-    if pending_sessions_count > 0 {
-        if restart_guard.check_and_record() {
-            warn!(
-                pending_sessions_count,
-                "Restart-loop breaker TRIPPED: skipping auto-resume of in-flight sessions to break crash loop"
-            );
-        } else {
-            let recovered_sessions = recover_resume_pending_sessions(&pool, &multiplexer).await?;
-            info!(
-                recovered_sessions,
-                "recovered resume_pending sessions on boot"
-            );
-        }
-    }
+    maybe_resume_pending_sessions(&config, &pool, &stack.multiplexer).await?;
 
     let scheduler = CronScheduler::with_dispatcher(
         pool.clone(),
         Arc::new(AgentCronExecutor {
-            runner: runner.clone(),
+            runner: stack.runner.clone(),
             cron_script_timeout_secs: config.cron_script_timeout_secs,
         }),
         discord_egress,
     )
-    .with_hermes_sync(cron_sync);
+    .with_hermes_sync(stack.cron_sync);
     scheduler.start().await;
 
-    let mut poise_data = PoiseData::new(multiplexer.clone(), pool.clone());
+    let mut poise_data = PoiseData::new(stack.multiplexer.clone(), pool.clone());
     poise_data.pairing_store.init_cache().await?;
-    poise_data.profile_router = profile_router;
+    poise_data.profile_router = stack.profile_router.clone();
     poise_data.missed_backfill = config.discord_missed_backfill;
-    poise_data.llm = Some(llm.clone());
-    poise_data.tools = tool_names;
-    poise_data.tool_registry = tools.clone();
+    poise_data.llm = Some(stack.llm.clone());
+    poise_data.tools = stack.tool_names.clone();
+    poise_data.tool_registry = stack.tools.clone();
     poise_data.free_response_channels = config.free_response_channels.clone();
     poise_data.allowed_users = config.allowed_users.clone();
     poise_data.allowed_roles = config.allowed_roles.clone();
@@ -2446,7 +2528,7 @@ async fn run_gateway() -> Result<()> {
             "invalid primary Discord bot identity {default_bot_id}"
         ))
     })?);
-    let adapter = DiscordAdapter::new(poise_data).with_approval_guard(approval_guard);
+    let adapter = DiscordAdapter::new(poise_data).with_approval_guard(stack.approval_guard.clone());
 
     let mut clients = Vec::new();
     let mut shard_managers = Vec::new();
@@ -2497,7 +2579,7 @@ async fn run_gateway() -> Result<()> {
         signal = tokio::signal::ctrl_c() => {
             signal.map_err(|error| OmonError::Config(format!("failed to listen for Ctrl+C: {error}")))?;
             info!("shutdown signal received");
-            let _ = multiplexer.mark_in_flight_resume_pending().await;
+            let _ = stack.multiplexer.mark_in_flight_resume_pending().await;
             for sm in shard_managers {
                 sm.shutdown_all().await;
             }
@@ -2505,7 +2587,7 @@ async fn run_gateway() -> Result<()> {
         changed = drain_rx.changed() => {
             if changed.is_ok() && *drain_rx.borrow() {
                 warn!("drain request detected via .drain_request.json marker; shutting down gracefully");
-                let _ = multiplexer.mark_in_flight_resume_pending().await;
+                let _ = stack.multiplexer.mark_in_flight_resume_pending().await;
                 for sm in shard_managers {
                     sm.shutdown_all().await;
                 }
@@ -2514,10 +2596,148 @@ async fn run_gateway() -> Result<()> {
     }
 
     scheduler.shutdown().await;
-    scale_to_zero.shutdown().await;
+    stack.scale_to_zero.shutdown().await;
     pool.close().await;
     warn!("omon-gateway stopped");
     Ok(())
+}
+
+async fn run_gateway_slack(config: Config) -> Result<()> {
+    let stack = build_agent_stack(&config).await?;
+    let pool = stack.pool.clone();
+
+    let pairing = omon_gateway::slack::SlackPairingStore::new(pool.clone());
+    let runtime_config = omon_gateway::slack::SlackRuntimeConfig {
+        bot_token: config
+            .slack_bot_token
+            .clone()
+            .ok_or_else(|| OmonError::Config("missing SLACK_BOT_TOKEN".into()))?,
+        app_token: config
+            .slack_app_token
+            .clone()
+            .ok_or_else(|| OmonError::Config("missing SLACK_APP_TOKEN".into()))?,
+        api_base: config.slack_api_base.clone(),
+        filter: config.slack_filter.clone(),
+        processing_reactions: parse_bool_from(
+            optional_env("SLACK_PROCESSING_REACTIONS").as_deref(),
+            config.processing_reactions,
+        ),
+        workspace_root: config.workspace_root.clone(),
+    };
+    let mut runtime = omon_gateway::slack::SlackRuntime::new(
+        runtime_config,
+        stack.approval_guard.clone(),
+        pairing,
+    );
+    let slack_egress = runtime.egress_dispatcher();
+    stack.shared_dispatcher.set(slack_egress.clone()).await;
+    stack
+        .approval_requester
+        .set_dispatcher(slack_egress.clone())
+        .await;
+    stack
+        .approval_requester
+        .set_heartbeat(stack.multiplexer.activity_heartbeat())
+        .await;
+    runtime.set_multiplexer(stack.multiplexer.clone());
+
+    let recovered = recover_pending_delivery_obligations(&pool, slack_egress.clone()).await?;
+    info!(
+        recovered,
+        "recovered pending outbound delivery obligations on boot"
+    );
+
+    maybe_resume_pending_sessions(&config, &pool, &stack.multiplexer).await?;
+
+    let scheduler = CronScheduler::with_dispatcher(
+        pool.clone(),
+        Arc::new(AgentCronExecutor {
+            runner: stack.runner.clone(),
+            cron_script_timeout_secs: config.cron_script_timeout_secs,
+        }),
+        slack_egress,
+    )
+    .with_hermes_sync(stack.cron_sync);
+    scheduler.start().await;
+
+    let readiness = omon_gateway::collect_runtime_readiness(
+        &pool,
+        &config.workspace_root,
+        &config.default_model,
+        1,
+    )
+    .await;
+    if readiness.is_ok() {
+        info!(status = %readiness.status, checks = ?readiness.checks, "runtime readiness probes passed");
+    } else {
+        warn!(status = %readiness.status, checks = ?readiness.checks, "runtime readiness probes reported degraded status");
+    }
+
+    info!(
+        model = %config.default_model,
+        database = %config.database_url,
+        api_base = %config.slack_api_base,
+        "omon-gateway listening on Slack"
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let runtime_cancel = cancel.clone();
+    let mut runtime_task = tokio::spawn(runtime.run(runtime_cancel));
+
+    let drain_watcher = omon_gateway::DrainWatcher::new(
+        config.workspace_root.clone(),
+        std::time::Duration::from_secs(3),
+    );
+    let mut drain_rx = drain_watcher.receiver();
+    let _drain_handle = drain_watcher.spawn();
+
+    tokio::select! {
+        result = &mut runtime_task => {
+            match result {
+                Ok(Err(error)) => {
+                    tracing::error!("Slack runtime exited with error: {:?}", error);
+                }
+                Err(error) => {
+                    tracing::error!("Slack runtime task failed: {:?}", error);
+                }
+                Ok(Ok(())) => {}
+            }
+        }
+        signal = tokio::signal::ctrl_c() => {
+            signal.map_err(|error| OmonError::Config(format!("failed to listen for Ctrl+C: {error}")))?;
+            info!("shutdown signal received");
+            let _ = stack.multiplexer.mark_in_flight_resume_pending().await;
+            cancel.cancel();
+        }
+        changed = drain_rx.changed() => {
+            if changed.is_ok() && *drain_rx.borrow() {
+                warn!("drain request detected via .drain_request.json marker; shutting down gracefully");
+                let _ = stack.multiplexer.mark_in_flight_resume_pending().await;
+                cancel.cancel();
+            }
+        }
+    }
+
+    if !runtime_task.is_finished() {
+        let _ = (&mut runtime_task).await;
+    }
+    scheduler.shutdown().await;
+    stack.scale_to_zero.shutdown().await;
+    pool.close().await;
+    warn!("omon-gateway stopped");
+    Ok(())
+}
+
+fn parse_string_list(raw: Option<&str>) -> Vec<String> {
+    raw.map(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn required_env(name: &str) -> Result<String> {
