@@ -100,6 +100,10 @@ impl Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
+    if let Some(home) = std::env::var_os("HOME") {
+        let fallback = std::path::PathBuf::from(home).join(".omon").join(".env");
+        let _ = dotenvy::from_path(fallback);
+    }
     legacy::dashboard::init_tracing();
 
     match Cli::parse().into_command() {

@@ -169,7 +169,35 @@ Only mapped keys are written to the authoritative `.env`; unrelated values from 
 
 ## 🚀 Quickstart
 
-### 1. Build and Run from Source
+### 1. One-Line Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/trac3r00/omon-gateway/main/install.sh | sh
+```
+
+The installer clones (or uses a local checkout), builds the release binary, and installs it to `~/.local/bin` — no sudo. Set `PREFIX=/usr/local` to change the location.
+
+### 2. Guided Setup
+
+```bash
+omon-gateway setup
+```
+
+The wizard asks for your platform (`discord` or `slack`), tokens, and model, then writes a minimal `.env` (owner-only `0600`) and validates it live with the built-in doctor. Fully scriptable for automation:
+
+```bash
+omon-gateway setup --platform slack --bot-token xoxb-... --app-token xapp-... --model gpt-4o-mini --api-key sk-...
+```
+
+### 3. Preflight Anytime
+
+```bash
+omon-gateway doctor
+```
+
+`doctor` checks platform selection, token presence and **live token validity**, model credentials, database writability, and workspace permissions — every failure prints an actionable `fix:` hint and the exit code reflects the result. Configuration is read from `./.env`, falling back to `~/.omon/.env` (handy for installed binaries run from any directory).
+
+### 4. Build and Run from Source
 
 ```bash
 # Clone the repository
@@ -207,13 +235,13 @@ OMON_PLATFORM=slack SLACK_BOT_TOKEN=xoxb-... SLACK_APP_TOKEN=xapp-... cargo run 
 
 Try it without Slack credentials: `cargo run --example mock_slack` serves a local mock Web API + Socket Mode endpoint; point `SLACK_API_BASE=http://127.0.0.1:9399` at it.
 
-### 2. Run with Docker Compose
+### 5. Run with Docker Compose
 
 ```bash
 docker compose up -d
 ```
 
-### 3. Run as macOS Background Service (LaunchAgent)
+### 6. Run as macOS Background Service (LaunchAgent)
 
 ```bash
 # Build release binary
