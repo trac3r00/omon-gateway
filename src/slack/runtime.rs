@@ -278,7 +278,7 @@ impl SlackRuntime {
     }
 
     async fn handle_unauthorized_dm(&self, channel: &str, user: &str, text: &str) -> Result<()> {
-        let normalized = PairingStoreNormalize::normalize(text);
+        let normalized = crate::discord::pairing::PairingStore::normalize_code(text);
         if !normalized.is_empty() && normalized.len() == 8 {
             if let Ok(SlackPairingOutcome::Success { user_id }) =
                 self.pairing.approve_code(text).await
@@ -448,13 +448,5 @@ impl SlackRuntime {
             attachments.push(attachment);
         }
         attachments
-    }
-}
-
-struct PairingStoreNormalize;
-
-impl PairingStoreNormalize {
-    fn normalize(raw: &str) -> String {
-        crate::discord::pairing::PairingStore::normalize_code(raw)
     }
 }
