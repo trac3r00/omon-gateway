@@ -16,6 +16,7 @@ pub struct Recorder {
     pub auth_headers: Mutex<Vec<(String, String)>>,
     pub uploads: Mutex<Vec<Vec<u8>>>,
     pub base: Mutex<String>,
+    pub socket_url: Mutex<Option<String>>,
 }
 
 pub struct MockWebApi {
@@ -32,7 +33,6 @@ impl MockWebApi {
 
     pub async fn start_with_error(failing_method: Option<&'static str>) -> Self {
         let recorder = Arc::new(Recorder::default());
-        let state = recorder.clone();
         let fail = failing_method;
         let app = Router::new()
             .route(
@@ -69,7 +69,15 @@ impl MockWebApi {
                                 json!({"ok": true, "ts": "1700.000100", "channel": "C1"})
                             }
                             "apps.connections.open" => {
-                                json!({"ok": true, "url": "wss://wss-primary.slack.com/link/?ticket=abc"})
+                                let url = state
+                                    .socket_url
+                                    .lock()
+                                    .await
+                                    .clone()
+                                    .unwrap_or_else(|| {
+                                        "wss://wss-primary.slack.com/link/?ticket=abc".to_string()
+                                    });
+                                json!({"ok": true, "url": url})
                             }
                             "files.getUploadURLExternal" => json!({
                                 "ok": true,
@@ -138,6 +146,10 @@ impl MockWebApi {
             .iter()
             .find(|(m, _)| m == method)
             .map(|(_, a)| a.clone())
+    }
+
+    pub async fn set_socket_url(&self, url: &str) {
+        *self.recorder.socket_url.lock().await = Some(url.to_string());
     }
 
     pub async fn stop(mut self) {
