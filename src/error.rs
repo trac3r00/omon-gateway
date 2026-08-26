@@ -11,6 +11,9 @@ pub enum OmonError {
     #[error("Discord error: {0}")]
     Discord(Box<serenity::Error>),
 
+    #[error("Slack error: {0}")]
+    Slack(String),
+
     #[error("LLM error: {0}")]
     Llm(String),
 
