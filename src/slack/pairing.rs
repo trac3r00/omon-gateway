@@ -13,6 +13,7 @@ const CODE_TTL_SECONDS: i64 = 600;
 const RATE_LIMIT_SECONDS: i64 = 60;
 const MAX_FAILED_ATTEMPTS: i64 = 5;
 
+#[derive(Debug)]
 pub enum SlackPairingOutcome {
     Success { user_id: String },
     InvalidCode,

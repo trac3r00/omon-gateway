@@ -252,3 +252,91 @@ async fn app_mention_flows_through_agent_to_posted_reply() {
     assert!(result.is_ok(), "graceful shutdown, got {result:?}");
     rig.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn block_action_resolves_pending_approval_and_updates_message() {
+    let rig = E2eRig::start().await;
+    let workspace = TempDir::new().unwrap();
+    let database = Database::connect("sqlite::memory:").await.unwrap();
+    let pool = database.pool().clone();
+
+    let runner = StubRunner::new();
+    let approval_guard = SmartApprovalGuard::new().with_pool(pool.clone());
+    let pairing = SlackPairingStore::new(pool.clone());
+
+    let config = SlackRuntimeConfig {
+        bot_token: "xoxb-test".into(),
+        app_token: "xapp-test".into(),
+        api_base: rig.mock.base.clone(),
+        filter: OwnedSlackFilter {
+            allow_all_users: true,
+            ..OwnedSlackFilter::default()
+        },
+        processing_reactions: false,
+        workspace_root: workspace.path().to_path_buf(),
+    };
+    let mut runtime = SlackRuntime::new(config, approval_guard.clone(), pairing);
+    let dispatcher = runtime.egress_dispatcher();
+    runner.dispatcher.write().await.replace(dispatcher.clone());
+    let multiplexer = SessionMultiplexer::with_dispatcher(
+        pool.clone(),
+        runner.clone(),
+        Some(dispatcher),
+        MultiplexerConfig::default(),
+    );
+    runtime.set_multiplexer(multiplexer);
+
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let run = tokio::spawn(async move { runtime.run(run_cancel).await });
+    rig.wait_connected().await;
+
+    let prompt = approval_guard.request().await;
+    let request_id = prompt.request_id;
+    let waiter = tokio::spawn(prompt.wait(Duration::from_secs(5)));
+
+    rig.envelopes
+        .send(json!({
+            "envelope_id": "env-interactive-1",
+            "type": "interactive",
+            "payload": {
+                "type": "block_actions",
+                "user": {"id": "U1"},
+                "channel": {"id": "C1"},
+                "message": {"ts": "1700.000100"},
+                "actions": [{"value": format!("omon:approval:{request_id}:once")}]
+            }
+        }))
+        .await
+        .unwrap();
+
+    let decision = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("approval wait completes")
+        .expect("waiter joins")
+        .expect("approval resolves");
+    assert_eq!(decision, omon_gateway::ApprovalDecision::Once);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let updates = rig.mock.calls_for("chat.update").await;
+            if updates
+                .iter()
+                .any(|u| u["text"].as_str().is_some_and(|t| t.contains("Approved (once)")))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approval message updated with decision label");
+
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("runtime exits")
+        .expect("runtime joins");
+    assert!(result.is_ok());
+    rig.stop().await;
+}
