@@ -4675,7 +4675,7 @@ mod platform_config_tests {
         }
     }
 
-    const PLATFORM_VARS: &[&'static str] = &[
+    const PLATFORM_VARS: &[&str] = &[
         "OMON_PLATFORM",
         "DISCORD_BOT_TOKEN",
         "DISCORD_BOT_TOKENS",

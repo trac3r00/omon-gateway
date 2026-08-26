@@ -162,7 +162,7 @@ pub async fn resolve_predecessor_output(
                         Some((p, mtime))
                     })
                     .collect();
-                files.sort_by(|a, b| b.1.cmp(&a.1));
+                files.sort_by_key(|f| std::cmp::Reverse(f.1));
                 if let Some((latest_file, _)) = files.first() {
                     if let Ok(content) = std::fs::read_to_string(latest_file) {
                         if !content.trim().is_empty() {

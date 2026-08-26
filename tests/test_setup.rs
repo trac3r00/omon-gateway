@@ -1,11 +1,9 @@
 mod common;
 
-use std::sync::Mutex;
-
 use common::MockWebApi;
 use omon_gateway::{run_setup, SetupFlags};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn slack_flags(dir: &std::path::Path) -> SetupFlags {
     SetupFlags {
@@ -43,7 +41,7 @@ fn render_env_contains_platform_tokens_and_model() {
 
 #[tokio::test]
 async fn non_interactive_setup_writes_env_and_runs_doctor() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().await;
     let mock = MockWebApi::start().await;
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("SLACK_API_BASE", &mock.base);
@@ -74,12 +72,12 @@ async fn non_interactive_setup_writes_env_and_runs_doctor() {
 
 #[tokio::test]
 async fn existing_env_refuses_clobber_without_force() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(".env"), "PRECIOUS=1").unwrap();
 
     let result = run_setup(slack_flags(dir.path()), |_, _| unreachable!()).await;
-    let error = result.err().expect("clobber must fail");
+    let error = result.expect_err("clobber must fail");
     assert!(
         error.to_string().contains("--force"),
         "error must mention --force: {error}"
@@ -103,7 +101,7 @@ async fn existing_env_refuses_clobber_without_force() {
 
 #[tokio::test]
 async fn interactive_prompts_fill_missing_answers() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().await;
     let mock = MockWebApi::start().await;
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("SLACK_API_BASE", &mock.base);

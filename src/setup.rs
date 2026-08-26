@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::doctor::{run_doctor, DoctorInput, DoctorReport};
 use crate::error::OmonError;

@@ -422,7 +422,7 @@ impl SlackRuntime {
             };
 
             let small_enough = size_bytes.is_some_and(|size| {
-                size > 0 && size <= MAX_INLINED_ATTACHMENT_BYTES as u64
+                size > 0 && size <= MAX_INLINED_ATTACHMENT_BYTES
             });
             if small_enough
                 && !attachment.url.is_empty()
