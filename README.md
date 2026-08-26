@@ -93,6 +93,7 @@ It multiplexes thousands of concurrent channels, threads, and DMs with sub-milli
 ## ✨ Key Features
 
 - ⚡ **Lock-Free Session Multiplexing**: Routes messages across servers, threads, and DMs using composite session keys `(platform, guild_id, channel_id, thread_id, user_id)` with zero lock contention.
+- 💬 **Multi-Platform (Discord or Slack)**: Pick your chat platform with `OMON_PLATFORM=discord|slack` (or `--platform`) — same agent engine, same tools, same session semantics, one binary.
 - 🤖 **Multi-Bot Parallel Sharding**: Run and control multiple Discord bot identities simultaneously from a single compiled ~20MB binary.
 - 📉 **Scale-to-Zero GC**: Inactive sessions automatically flush their state to SQLite and evict worker tasks, reducing idle memory footprint to near zero.
 - 🎙️ **Songbird Discord Voice**: Stream bidirectional Opus/PCM audio directly in Discord voice channels.
@@ -182,6 +183,29 @@ cp .env.example .env
 cargo run --release
 ```
 
+### Slack Mode
+
+The gateway can serve **Slack instead of Discord** — one platform per process, selected at boot:
+
+```bash
+OMON_PLATFORM=slack SLACK_BOT_TOKEN=xoxb-... SLACK_APP_TOKEN=xapp-... cargo run --release
+# or: cargo run --release -- run --platform slack
+```
+
+**App setup (api.slack.com/apps):**
+
+1. Create an app and enable **Socket Mode**.
+2. Generate an **app-level token** with the `connections:write` scope (`SLACK_APP_TOKEN`, `xapp-...`).
+3. Add bot scopes: `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `files:read`, `files:write`, `groups:history`, `im:history`, `im:read`, `im:write`, `reactions:write`, `users:read`.
+4. Subscribe to bot events: `app_mention`, `message.channels`, `message.groups`, `message.im`.
+5. Install the app to your workspace and copy the bot token (`SLACK_BOT_TOKEN`, `xoxb-...`).
+
+**What works in Slack mode (parity with Discord):** DMs and channels, @-mention gating with free-response channels, thread-anchored sessions (a channel message anchors its own thread so replies continue the same conversation), streaming replies via live message edits, file uploads and text-attachment inlining, processing reactions (eyes/check/X), interactive approvals as Block Kit buttons, DM pairing codes, cron delivery, delivery-ledger recovery, and scale-to-zero session GC.
+
+**Honest gaps (Discord-only today):** slash commands, voice/audio, multi-bot sharding, forum posts, and typing indicators (Slack exposes no bot typing API). Split-message debouncing is not yet applied on the Slack ingress path.
+
+Try it without Slack credentials: `cargo run --example mock_slack` serves a local mock Web API + Socket Mode endpoint; point `SLACK_API_BASE=http://127.0.0.1:9399` at it.
+
 ### 2. Run with Docker Compose
 
 ```bash
@@ -205,6 +229,18 @@ launchctl load ~/Library/LaunchAgents/ai.omon.gateway.plist
 
 | Environment Variable | Default | Description |
 |---|---|---|
+| `OMON_PLATFORM` | `discord` | Chat platform to serve: `discord` or `slack` (also `--platform` on `run`; unknown values fail fast) |
+| `SLACK_BOT_TOKEN` | Required in slack mode | Slack bot token (`xoxb-...`) |
+| `SLACK_APP_TOKEN` | Required in slack mode | Slack app-level token with `connections:write` (`xapp-...`) |
+| `SLACK_API_BASE` | `https://slack.com/api` | Slack Web API base URL override (local dev / mock server) |
+| `SLACK_ALLOWED_USERS` | Optional | Comma-separated Slack user IDs authorized to interact |
+| `SLACK_ALLOW_ALL_USERS` | `false` | When true, all workspace users are authorized |
+| `SLACK_FREE_RESPONSE_CHANNELS` | Optional | Slack channels where the bot responds without @mention |
+| `SLACK_ALLOWED_CHANNELS` | Optional | Slack channel whitelist (DMs exempt) |
+| `SLACK_IGNORED_CHANNELS` | Optional | Slack channel blacklist |
+| `SLACK_THREAD_SESSIONS_PER_USER` | `true` | When false, all users in a thread share one conversation session |
+| `SLACK_THREAD_REQUIRE_MENTION` | `false` | When true, requires an @-mention even in active bot threads |
+| `SLACK_PROCESSING_REACTIONS` | `true` | Eyes/check/X processing reactions (falls back to `DISCORD_PROCESSING_REACTIONS`) |
 | `DISCORD_BOT_TOKEN` | Required | Primary Discord Bot Token |
 | `DISCORD_BOT_TOKENS` | Optional | Comma-separated tokens for Multi-Bot sharding |
 | `DISCORD_ALLOWED_USERS` | Optional | Allowed Discord user IDs (empty allows all) |
