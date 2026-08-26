@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod cron;
 pub mod discord;
+pub mod doctor;
 pub mod drain_control;
 pub mod error;
 pub mod ledger;
@@ -12,6 +13,7 @@ pub mod multiplexer;
 pub mod platform;
 pub mod readiness;
 pub mod security;
+pub mod setup;
 pub mod slack;
 pub mod storage;
 pub mod tools;
@@ -20,6 +22,9 @@ pub mod voice;
 pub use agent::*;
 pub use cron::*;
 pub use discord::*;
+pub use doctor::{
+    run_doctor, CheckStatus, DoctorCheck, DoctorInput, DoctorReport, DEFAULT_DISCORD_API_BASE,
+};
 pub use drain_control::*;
 pub use error::{OmonError, Result};
 pub use ledger::{DeliveryLedgerEntry, DeliveryLedgerService};
@@ -34,7 +39,9 @@ pub use multiplexer::{
 pub use platform::Platform;
 pub use readiness::*;
 pub use security::*;
+pub use setup::{render_env, run_setup, SetupFlags, SetupOutcome};
 pub use storage::Database;
+pub use slack::DEFAULT_SLACK_API_BASE;
 pub use tools::{
     augmented_path_from_environment, build_augmented_path, build_session_environment,
     ApprovalPolicy, BrowserTool, CronTool, FileTool, McpClientTool, McpTool, McpTransport,

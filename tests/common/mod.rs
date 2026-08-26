@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Request, State};
-use axum::response::Json;
+use axum::response::{IntoResponse, Json};
 use axum::routing::post;
 use axum::Router;
 use serde_json::{json, Value};
@@ -19,6 +19,7 @@ pub struct Recorder {
     pub uploads: Mutex<Vec<Vec<u8>>>,
     pub base: Mutex<String>,
     pub socket_url: Mutex<Option<String>>,
+    pub fail_get_me: Mutex<bool>,
 }
 
 pub struct MockWebApi {
@@ -87,8 +88,7 @@ impl MockWebApi {
                                 "file_id": "F0UPLOAD"
                             }),
                             "files.completeUploadExternal" => json!({"ok": true}),
-                            "conversations.history" | "conversations.replies" => json!({
-                                "ok": true,
+                            "conversations.history" | "conversations.replies" => json!({                                "ok": true,
                                 "messages": [
                                     {"type": "message", "user": "U1", "text": "first", "ts": "9.1"},
                                     {"type": "message", "user": "U2", "text": "second", "ts": "9.2"}
@@ -98,6 +98,26 @@ impl MockWebApi {
                         };
                         Json(response)
                     }
+                }),
+            )
+            .route(
+                "/users/@me",
+                axum::routing::get(|State(state): State<Arc<Recorder>>, request: Request| async move {
+                    let auth = request
+                        .headers()
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    state
+                        .auth_headers
+                        .lock()
+                        .await
+                        .push(("users/@me".to_string(), auth));
+                    if *state.fail_get_me.lock().await {
+                        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    Json(json!({"id": "123456789", "username": "omon-mock-bot"})).into_response()
                 }),
             )
             .route(
