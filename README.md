@@ -10,20 +10,21 @@
    G  A  T  E  W  A  Y
 ```
 
-**High-performance, Zero-GC Discord Multiplexer Gateway for OMO (oh-my-openagent) in 100% Rust.**
+**High-performance, Zero-GC Discord & Slack Multiplexer Gateway for OMO (oh-my-openagent) in 100% Rust.**
 
 [![Rust](https://img.shields.io/badge/Rust-1.78+-f74c00?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Tokio](https://img.shields.io/badge/Tokio-Async_Runtime-232f3e?style=flat-square&logo=rust&logoColor=white)](https://tokio.rs/)
 [![Discord](https://img.shields.io/badge/Discord-Gateway_v10-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.com/developers/docs)
+[![Slack](https://img.shields.io/badge/Slack-Socket_Mode-4A154B?style=flat-square&logo=slack&logoColor=white)](https://api.slack.com/apis/socket-mode)
 [![License](https://img.shields.io/badge/License-Apache_2.0-22c55e?style=flat-square)](LICENSE)
 [![Zero GC](https://img.shields.io/badge/GC-Zero_Pause-a855f7?style=flat-square)]()
 [![Platform](https://img.shields.io/badge/Platform-Linux_|_macOS_|_Docker-0ea5e9?style=flat-square)]()
 
 ---
 
-### The Native Discord Bridge for OMO
+### The Native Discord & Slack Bridge for OMO
 
-**OMO Gateway** is a dedicated, ultra-fast Rust gateway that bridges **OMO (oh-my-openagent)** directly to Discord.<br/>
+**OMO Gateway** is a dedicated, ultra-fast Rust gateway that bridges **OMO (oh-my-openagent)** directly to Discord or Slack (your choice via `OMON_PLATFORM`).<br/>
 It multiplexes thousands of concurrent channels, threads, and DMs with sub-millisecond routing, multi-bot sharding, scale-to-zero memory reclamation, and sandboxed tool execution.
 
 </div>
@@ -45,7 +46,7 @@ It multiplexes thousands of concurrent channels, threads, and DMs with sub-milli
 ## 🏗️ Architecture
 
 ```
-[ Discord Ingress: DMs / Server Channels / Threads / Voice ]
+[ Ingress: Discord or Slack — DMs / Channels / Threads / Voice ]
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
