@@ -40,10 +40,17 @@ struct Cli {
     command: Option<Command>,
 }
 
+#[derive(Debug, Default, clap::Args)]
+pub struct RunArgs {
+    /// Chat platform to serve: discord (default) or slack. Overrides OMON_PLATFORM.
+    #[arg(long, value_parser = clap::value_parser!(omon_gateway::Platform))]
+    platform: Option<omon_gateway::Platform>,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run the Discord gateway and, when enabled by environment, the dashboard.
-    Run,
+    Run(RunArgs),
     /// Run only the Web Dashboard HTTP/WebSocket server.
     Dashboard(legacy::dashboard::DashboardArgs),
     /// Alias for `dashboard`.
@@ -54,7 +61,7 @@ enum Command {
 
 impl Cli {
     fn into_command(self) -> Command {
-        self.command.unwrap_or(Command::Run)
+        self.command.unwrap_or(Command::Run(RunArgs::default()))
     }
 }
 
@@ -64,7 +71,12 @@ async fn main() -> Result<()> {
     legacy::dashboard::init_tracing();
 
     match Cli::parse().into_command() {
-        Command::Run => run_gateway_with_optional_dashboard().await,
+        Command::Run(args) => {
+            if let Some(platform) = args.platform {
+                std::env::set_var("OMON_PLATFORM", platform.as_str());
+            }
+            run_gateway_with_optional_dashboard().await
+        }
         Command::Dashboard(args) | Command::Serve(args) => {
             legacy::dashboard_runtime::run_standalone_cli(
                 legacy::dashboard::DashboardSettings::from_args(args),
@@ -116,8 +128,27 @@ mod tests {
             Cli::try_parse_from(["omon-gateway"])
                 .unwrap()
                 .into_command(),
-            Command::Run
+            Command::Run(_)
         ));
+    }
+
+    #[test]
+    fn cli_run_accepts_platform_flag() {
+        let cli = Cli::try_parse_from(["omon-gateway", "run", "--platform", "slack"]).unwrap();
+        match cli.into_command() {
+            Command::Run(args) => {
+                assert_eq!(args.platform, Some(omon_gateway::Platform::Slack))
+            }
+            other => panic!("expected run command, got {other:?}"),
+        }
+
+        let default = Cli::try_parse_from(["omon-gateway", "run"]).unwrap();
+        match default.into_command() {
+            Command::Run(args) => assert_eq!(args.platform, None),
+            other => panic!("expected run command, got {other:?}"),
+        }
+
+        assert!(Cli::try_parse_from(["omon-gateway", "run", "--platform", "bogus"]).is_err());
     }
 
     #[test]

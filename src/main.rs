@@ -377,7 +377,11 @@ impl Cli {
 }
 
 pub(crate) struct Config {
+    platform: omon_gateway::Platform,
     discord_bot_tokens: Vec<String>,
+    slack_bot_token: Option<String>,
+    slack_app_token: Option<String>,
+    slack_api_base: String,
     database_url: String,
     default_model: String,
     openai_api_base: Option<String>,
@@ -412,6 +416,7 @@ pub(crate) struct Config {
 
 impl Config {
     fn from_env() -> Result<Self> {
+        let platform = omon_gateway::Platform::from_env()?;
         let mut free_response_channels: Vec<u64> = env::var("DISCORD_FREE_RESPONSE_CHANNELS")
             .ok()
             .map(|s| {
@@ -452,27 +457,58 @@ impl Config {
         let ignored_channels = parse_u64_list(optional_env("DISCORD_IGNORED_CHANNELS").as_deref());
 
         let mut tokens = Vec::new();
-        if let Ok(tok) = env::var("DISCORD_BOT_TOKEN") {
-            for t in tok.split(',') {
-                let trimmed = t.trim().trim_matches('"').trim_matches('\'');
-                if !trimmed.is_empty() {
-                    tokens.push(trimmed.to_string());
+        let mut slack_bot_token = None;
+        let mut slack_app_token = None;
+        match platform {
+            omon_gateway::Platform::Discord => {
+                if let Ok(tok) = env::var("DISCORD_BOT_TOKEN") {
+                    for t in tok.split(',') {
+                        let trimmed = t.trim().trim_matches('"').trim_matches('\'');
+                        if !trimmed.is_empty() {
+                            tokens.push(trimmed.to_string());
+                        }
+                    }
+                }
+                if let Ok(toks) = env::var("DISCORD_BOT_TOKENS") {
+                    for t in toks.split(',') {
+                        let trimmed = t.trim().trim_matches('"').trim_matches('\'');
+                        if !trimmed.is_empty() && !tokens.contains(&trimmed.to_string()) {
+                            tokens.push(trimmed.to_string());
+                        }
+                    }
+                }
+                if tokens.is_empty() {
+                    return Err(OmonError::Config(
+                        "missing required environment variable DISCORD_BOT_TOKEN".into(),
+                    ));
                 }
             }
-        }
-        if let Ok(toks) = env::var("DISCORD_BOT_TOKENS") {
-            for t in toks.split(',') {
-                let trimmed = t.trim().trim_matches('"').trim_matches('\'');
-                if !trimmed.is_empty() && !tokens.contains(&trimmed.to_string()) {
-                    tokens.push(trimmed.to_string());
-                }
+            omon_gateway::Platform::Slack => {
+                slack_bot_token = Some(
+                    optional_env("SLACK_BOT_TOKEN")
+                        .filter(|t| !t.is_empty())
+                        .ok_or_else(|| {
+                            OmonError::Config(
+                                "missing required environment variable SLACK_BOT_TOKEN (platform=slack)"
+                                    .into(),
+                            )
+                        })?,
+                );
+                slack_app_token = Some(
+                    optional_env("SLACK_APP_TOKEN")
+                        .filter(|t| !t.is_empty())
+                        .ok_or_else(|| {
+                            OmonError::Config(
+                                "missing required environment variable SLACK_APP_TOKEN (platform=slack)"
+                                    .into(),
+                            )
+                        })?,
+                );
             }
         }
-        if tokens.is_empty() {
-            return Err(OmonError::Config(
-                "missing required environment variable DISCORD_BOT_TOKEN".into(),
-            ));
-        }
+        let slack_api_base = optional_env("SLACK_API_BASE")
+            .map(|base| base.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| omon_gateway::slack::DEFAULT_SLACK_API_BASE.to_string());
 
         let workspace_root = env::var_os("OMON_WORKSPACE_ROOT")
             .map(PathBuf::from)
@@ -508,7 +544,11 @@ impl Config {
         profile_routes.extend(channel_prompt_routes);
 
         Ok(Self {
+            platform,
             discord_bot_tokens: tokens,
+            slack_bot_token,
+            slack_app_token,
+            slack_api_base,
             database_url: env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "sqlite://omon_gateway.db".to_owned()),
             default_model: required_env("DEFAULT_MODEL")?,
@@ -4386,5 +4426,118 @@ mod runner_tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+}
+
+#[cfg(test)]
+mod platform_config_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvReset(Vec<(&'static str, Option<String>)>);
+
+    impl EnvReset {
+        fn capture(vars: &[&'static str]) -> Self {
+            Self(vars.iter().map(|v| (*v, env::var(v).ok())).collect())
+        }
+    }
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                match value {
+                    Some(value) => env::set_var(name, value),
+                    None => env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    const PLATFORM_VARS: &[&'static str] = &[
+        "OMON_PLATFORM",
+        "DISCORD_BOT_TOKEN",
+        "DISCORD_BOT_TOKENS",
+        "SLACK_BOT_TOKEN",
+        "SLACK_APP_TOKEN",
+        "DEFAULT_MODEL",
+    ];
+
+    fn clear_platform_vars() {
+        for name in PLATFORM_VARS {
+            env::remove_var(name);
+        }
+    }
+
+    #[test]
+    fn slack_mode_requires_slack_tokens_and_skips_discord_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _reset = EnvReset::capture(PLATFORM_VARS);
+        clear_platform_vars();
+
+        env::set_var("OMON_PLATFORM", "slack");
+        env::set_var("DEFAULT_MODEL", "gpt-4o-mini");
+        let err = match Config::from_env() {
+            Err(err) => err,
+            Ok(_) => panic!("expected config validation to fail"),
+        };
+        assert!(
+            err.to_string().contains("SLACK_BOT_TOKEN"),
+            "expected SLACK_BOT_TOKEN error, got: {err}"
+        );
+
+        env::set_var("SLACK_BOT_TOKEN", "xoxb-test");
+        let err = match Config::from_env() {
+            Err(err) => err,
+            Ok(_) => panic!("expected config validation to fail"),
+        };
+        assert!(
+            err.to_string().contains("SLACK_APP_TOKEN"),
+            "expected SLACK_APP_TOKEN error, got: {err}"
+        );
+
+        env::set_var("SLACK_APP_TOKEN", "xapp-test");
+        let config = Config::from_env().expect("slack config should validate");
+        assert_eq!(config.platform, omon_gateway::Platform::Slack);
+        assert!(config.discord_bot_tokens.is_empty());
+        assert_eq!(config.slack_bot_token.as_deref(), Some("xoxb-test"));
+        assert_eq!(config.slack_app_token.as_deref(), Some("xapp-test"));
+    }
+
+    #[test]
+    fn unknown_platform_fails_fast_naming_valid_options() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _reset = EnvReset::capture(PLATFORM_VARS);
+        clear_platform_vars();
+
+        env::set_var("OMON_PLATFORM", "bogus");
+        env::set_var("DEFAULT_MODEL", "gpt-4o-mini");
+        let err = match Config::from_env() {
+            Err(err) => err,
+            Ok(_) => panic!("expected config validation to fail"),
+        };
+        let message = err.to_string();
+        assert!(message.contains("discord") && message.contains("slack"));
+        assert!(message.contains("bogus"));
+    }
+
+    #[test]
+    fn discord_mode_remains_default_and_requires_discord_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _reset = EnvReset::capture(PLATFORM_VARS);
+        clear_platform_vars();
+
+        env::set_var("DEFAULT_MODEL", "gpt-4o-mini");
+        let err = match Config::from_env() {
+            Err(err) => err,
+            Ok(_) => panic!("expected config validation to fail"),
+        };
+        assert!(err.to_string().contains("DISCORD_BOT_TOKEN"));
+
+        env::set_var("DISCORD_BOT_TOKEN", "discord-token");
+        let config = Config::from_env().expect("discord config should validate");
+        assert_eq!(config.platform, omon_gateway::Platform::Discord);
+        assert_eq!(config.discord_bot_tokens, vec!["discord-token".to_string()]);
     }
 }

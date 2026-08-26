@@ -9,8 +9,10 @@ pub mod migrate;
 pub mod mirror;
 pub mod models;
 pub mod multiplexer;
+pub mod platform;
 pub mod readiness;
 pub mod security;
+pub mod slack;
 pub mod storage;
 pub mod tools;
 pub mod voice;
@@ -29,6 +31,7 @@ pub use multiplexer::{
     MultiplexerConfig, OutboundDispatcher, ProfileRoute, ProfileRouter, RestartLoopGuard,
     ScaleToZero, SessionActor, SessionMultiplexer,
 };
+pub use platform::Platform;
 pub use readiness::*;
 pub use security::*;
 pub use storage::Database;
